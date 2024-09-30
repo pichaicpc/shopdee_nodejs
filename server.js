@@ -1036,9 +1036,104 @@ app.get('/api/orderdetail/:custID/:orderID', (req, res) => {
     }      
 }); 
   
-  
+
+//แสดงข้อมูลการสั่งซื้อ ของรายการที่เลือก (admin)
+app.get('/api/orderinfo/:orderID', async (req, res) => {    
+    const orderID = req.params.orderID;
+
+    const token = req.headers["authorization"].replace("Bearer ", "");
+    try{
+        let decode = jwt.verify(token, SECRET_KEY);               
+        if(decode.positionID != 1 && decode.positionID != 2) {
+          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        }
+
+        //order info
+        let sql = `
+        SELECT 
+            orders.orderID, 
+            DATE_FORMAT(orderDate, '%Y-%m-%d %H:%i:%s') AS orderDate,
+            DATE_FORMAT(shipDate, '%Y-%m-%d %H:%i:%s') AS shipDate,
+            DATE_FORMAT(receiveDate, '%Y-%m-%d %H:%i:%s') AS receiveDate, 
+            orders.custID, statusID,
+            customer.firstName,customer.lastName,customer.address,customer.mobilePhone,
+            SUM(orderdetail.quantity) AS totalQuantity,
+            SUM(orderdetail.quantity*orderdetail.price) AS totalPrice
+        FROM orders
+            INNER JOIN customer ON customer.custID=orders.custID
+            INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID
+        WHERE orders.orderID=?
+        GROUP BY orders.orderID, orderDate, shipDate,
+            receiveDate, orders.custID, statusID,
+        customer.firstName,customer.lastName,customer.address,customer.mobilePhone`;
+    
+        let orderInfo = await query(sql, [orderID]);
+
+        //order details
+        sql = 'SELECT orderdetail.*,product.productName ';
+        sql += 'FROM orderdetail ';
+        sql += '    INNER JOIN product ON orderdetail.productID = product.productID ';         
+        sql += 'WHERE orderID=? ';
+
+        let orderDetails = await query(sql, [orderID]);
+        orderInfo[0]['orderDetails'] = orderDetails;
+        res.json(orderInfo);
+
+    }catch(error){
+        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+    }        
+
+}); 
+
+//แสดงรายการประวัติการสั่งซื้อ (admin)
+app.get('/api/admin/history', (req, res) => {
+
+    const token = req.headers["authorization"].replace("Bearer ", "");
+    try{
+        let decode = jwt.verify(token, SECRET_KEY);  
+        if(decode.positionID != 1 && decode.positionID != 2) {
+          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        }
+
+        let sql = `
+        SELECT orders.orderID, orders.custID, 
+            DATE_FORMAT(orderDate, '%Y-%m-%d %H:%i:%s') AS orderDate,
+            DATE_FORMAT(shipDate, '%Y-%m-%d %H:%i:%s') AS shipDate,
+            DATE_FORMAT(receiveDate, '%Y-%m-%d %H:%i:%s') AS receiveDate,        
+            CASE 
+                WHEN orders.statusID = 1 THEN 'รอการชำระเงิน'
+                WHEN orders.statusID = 2 THEN 'กำลังตรวจสอบการชำระ'
+                WHEN orders.statusID = 3 THEN 'ชำระแล้ว'
+                WHEN orders.statusID = 4 THEN 'กำลังส่งสินค้า'
+                WHEN orders.statusID = 5 THEN 'ส่งสินค้าแล้ว'
+                ELSE 'ไม่ทราบสถานะ'
+            END AS status,
+            customer.firstName,customer.lastName,
+            SUM(orderdetail.quantity) AS totalQuantity,
+            SUM(orderdetail.quantity*orderdetail.price) AS totalPrice
+        FROM orders
+            INNER JOIN customer ON customer.custID=orders.custID
+            INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID
+        WHERE orders.statusID<>0
+        GROUP BY orders.orderID, orderDate, shipDate,
+            receiveDate, orders.custID, status,
+            customer.firstName,customer.lastName
+        ORDER BY orders.orderID DESC`;
+
+        db.query(sql, (err, results) => {
+            if (err) throw err;
+            res.json(results);
+        });
+
+    }catch(error){
+        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+    }    
+
+}); 
+
+
 /*############## PAYMENT ##############*/
-//Payment
+//Add a payment
 app.post('/api/payment', (req, res) => {  
     const { custID, orderID, price} = req.body;  
     const token = req.headers["authorization"].replace("Bearer ", "");
@@ -1083,12 +1178,63 @@ app.post('/api/payment', (req, res) => {
 
 });
 
-//Show slip image
+//Show a slip image
 app.get('/api/payment/image/:filename', (req, res) => {
     const filepath = path.join(__dirname, 'assets/payment', req.params.filename);  
     res.sendFile(filepath);
 });
 
+
+//Show a payment (admin)
+app.get('/api/payment/:id', async (req, res) => {    
+    const orderID = req.params.id;
+
+    const token = req.headers["authorization"].replace("Bearer ", "");
+    try{
+        let decode = jwt.verify(token, SECRET_KEY);               
+        if(decode.custID > 0 && decode.positionID != 1 && decode.positionID != 2) {
+          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        }
+        
+        //order info
+        let sql = `
+        SELECT 
+            orders.orderID, 
+            DATE_FORMAT(orderDate, '%Y-%m-%d %H:%i:%s') AS orderDate,
+            DATE_FORMAT(shipDate, '%Y-%m-%d %H:%i:%s') AS shipDate,
+            DATE_FORMAT(receiveDate, '%Y-%m-%d %H:%i:%s') AS receiveDate, 
+            orders.custID, statusID,
+            customer.firstName,customer.lastName,customer.address,customer.mobilePhone,
+            SUM(orderdetail.quantity) AS totalQuantity,
+            SUM(orderdetail.quantity*orderdetail.price) AS totalPrice
+        FROM orders
+            INNER JOIN customer ON customer.custID=orders.custID
+            INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID
+        WHERE orders.orderID=?
+        GROUP BY orders.orderID, orderDate, shipDate,
+            receiveDate, orders.custID, statusID,
+        customer.firstName,customer.lastName,customer.address,customer.mobilePhone`;
+    
+        let orderInfo = await query(sql, [orderID]);
+
+        //payment details
+        sql = `
+        SELECT 
+            paymentID, orderID,
+            DATE_FORMAT(paymentDate, '%Y-%m-%d %H:%i:%s') AS paymentDate,
+            price, comment, slipFile, channelID 
+        FROM payment 
+        WHERE orderID=?`
+
+        let paymentDetails = await query(sql, [orderID]);
+        orderInfo[0]['paymentDetails'] = paymentDetails;
+        res.json(orderInfo);
+
+    }catch(error){
+        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+    }        
+
+}); 
 
 /*############## CHAT ##############*/
 //List of employees with the last message
