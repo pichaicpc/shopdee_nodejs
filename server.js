@@ -38,10 +38,25 @@ app.use(express.urlencoded ({extended: true}))
 app.use(cors());
 app.use(fileupload());
 
+
 //Hello World API
 app.get('/', function(req, res){
     res.send('Hello World!')
 });
+
+
+//Function to execute a query with a promise-based approach
+function query(sql, params) {
+    return new Promise((resolve, reject) => {
+      db.query(sql, params, (err, results) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(results);
+        }
+      });
+    });
+}
 
 
 /*############## CUSTOMER ##############*/
@@ -143,18 +158,42 @@ app.post('/api/login',
 );
 
 
-//Function to execute a query with a promise-based approach
-function query(sql, params) {
-    return new Promise((resolve, reject) => {
-      db.query(sql, params, (err, results) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(results);
+//Show a customer Profile
+app.get('/api/profile/:id',
+    async function(req, res){
+        const custID = req.params.id;        
+        const token = req.headers["authorization"].replace("Bearer ", "");
+            
+        try{
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(custID != decode.custID) {
+              return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }
+                        
+            let sql = "SELECT * FROM customer WHERE custID = ? AND isActive = 1";        
+            let customer = await query(sql, [custID]);        
+            
+            customer = customer[0];
+            customer['message'] = 'success';
+            customer['status'] = true;
+            res.send(customer); 
+
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
         }
-      });
-    });
-}
+        
+    }
+);
+
+
+//Show a customer image
+app.get('/api/customer/image/:filename', 
+    function(req, res) {        
+        const filepath = path.join(__dirname, 'assets/customer', req.params.filename);        
+        res.sendFile(filepath);
+    }
+);
+
 
 //List customers
 app.get('/api/customer',
@@ -181,21 +220,24 @@ app.get('/api/customer',
 );
 
 
-//Show a customer Profile
-app.get('/api/profile/:id',
+//Show a customer detail
+app.get('/api/customer/:id',
     async function(req, res){
-        const custID = req.params.id;        
-        const token = req.headers["authorization"].replace("Bearer ", "");
-            
+        const custID = req.params.id;                    
         try{
+            const token = req.headers["authorization"].replace("Bearer ", "");
             let decode = jwt.verify(token, SECRET_KEY);               
-            if(custID != decode.custID && decode.positionID != 1 && decode.positionID != 2) {
+            if(decode.positionID != 1 && decode.positionID != 2) {
               return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
             }
             
-            let sql = "SELECT * FROM customer WHERE custID = ? AND isActive = 1";        
-            let customer = await query(sql, [custID]);        
-            
+            const sql = `
+            SELECT 
+                customer.*, DATE_FORMAT(birthdate, '%Y-%m-%d') AS birthdate 
+            FROM customer             
+            WHERE custID = ? AND isActive = 1`;        
+
+            let customer = await query(sql, [custID]);                    
             customer = customer[0];
             customer['message'] = 'success';
             customer['status'] = true;
@@ -208,11 +250,69 @@ app.get('/api/profile/:id',
     }
 );
 
-//Show a customer image
-app.get('/api/customer/image/:filename', 
-    function(req, res) {        
-        const filepath = path.join(__dirname, 'assets/customer', req.params.filename);        
-        res.sendFile(filepath);
+
+//Add a customer
+app.post('/api/customer', 
+    async function(req, res){
+      
+        try{
+            //receive a token
+            const token = req.headers["authorization"].replace("Bearer ", "");    
+            const { username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone } = req.body;
+            
+            //validate the token    
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(decode.positionID != 1 && decode.positionID != 2) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }
+
+            //check existing username
+            let sql="SELECT * FROM customer WHERE username=?";
+            db.query(sql, [username], async function(err, results) {
+                if (err) throw err;
+                
+                if(results.length == 0) {
+                    //password and salt are encrypted by hash function (bcrypt)
+                    const salt = await bcrypt.genSalt(10); //generate salte
+                    const password_hash = await bcrypt.hash(password, salt); 
+                    
+                    //save file into folder  
+                    let fileName = "";
+                    if (req?.files?.imageFile){        
+                        const imageFile = req.files.imageFile; // image file    
+                        
+                        fileName = imageFile.name.split(".");// file name
+                        fileName = fileName[0] + Date.now() + '.' + fileName[1]; 
+                
+                        const imagePath = path.join(__dirname, 'assets/customer', fileName); //image path
+                
+                        fs.writeFile(imagePath, imageFile.data, (err) => {
+                        if(err) throw err;
+                        });
+                        
+                    }                
+                                    
+                    //insert customer data into the database
+                    sql = `
+                    INSERT INTO customer(
+                        username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone, imageFile
+                    ) 
+                    VALUES(
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )`;
+                    db.query(sql, [username, password_hash, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone, fileName], (err, result) => {
+                        if (err) throw err;
+                    
+                        res.send({'message':'บันทึกข้อมูลลูกค้าสำเร็จแล้ว','status':true});
+                    });      
+            }else{
+                res.send({'message':'ชื่อผู้ใช้ซ้ำ','status':false});
+            }
+
+        });      
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
     }
 );
 
@@ -249,10 +349,14 @@ app.put('/api/customer/:id',
     
         
             //save data into database
-            const {password, username, firstName, lastName, email, gender } = req.body;
+            const {username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone} = req.body;
         
-            let sql = 'UPDATE customer SET username = ?,firstName = ?, lastName = ?, email = ?, gender = ?';
-            let params = [username, firstName, lastName, email, gender];
+            let sql = `
+                UPDATE 
+                    customer 
+                SET username = ?,firstName = ?, lastName = ?, email = ?, gender = ?, 
+                    birthdate = ?, address = ?, homePhone = ?, mobilePhone = ?`;
+            let params = [username, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone];
         
             if (password) {
                 const salt = await bcrypt.genSalt(10);
@@ -386,7 +490,12 @@ app.get('/api/employee',
               return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
             }
             
-            let sql = "SELECT * FROM employee";            
+            const sql = `
+            SELECT employee.*, position.positionName 
+            FROM employee 
+            INNER JOIN position 
+                ON employee.positionID = position.positionID 
+            ORDER BY employee.empID ASC`;          
             db.query(sql, function (err, result){
                 if (err) throw err;            
                 res.send(result);
@@ -402,18 +511,22 @@ app.get('/api/employee',
 //Show an employee detail
 app.get('/api/employee/:id',
     async function(req, res){
-        const empID = req.params.id;        
-        const token = req.headers["authorization"].replace("Bearer ", "");
-            
+        const empID = req.params.id;                    
         try{
+            const token = req.headers["authorization"].replace("Bearer ", "");
             let decode = jwt.verify(token, SECRET_KEY);               
             if(empID != decode.empID && decode.positionID != 1) {
               return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
             }
             
-            let sql = "SELECT * FROM employee WHERE empID = ? AND isActive = 1";        
-            let employee = await query(sql, [empID]);        
-            
+            const sql = `
+            SELECT employee.*, position.positionName 
+            FROM employee 
+            INNER JOIN position 
+                ON employee.positionID = position.positionID 
+            WHERE employee.empID = ? AND employee.isActive = 1`;        
+
+            let employee = await query(sql, [empID]);                    
             employee = employee[0];
             employee['message'] = 'success';
             employee['status'] = true;
@@ -459,6 +572,22 @@ app.post('/api/employee',
                 return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
             }            
 
+            //save file into folder  
+            let fileName = "";
+            if (req?.files?.imageFile){        
+                const imageFile = req.files.imageFile; // image file    
+                
+                fileName = imageFile.name.split(".");// file name
+                fileName = fileName[0] + Date.now() + '.' + fileName[1]; 
+        
+                const imagePath = path.join(__dirname, 'assets/employee', fileName); //image path
+        
+                fs.writeFile(imagePath, imageFile.data, (err) => {
+                if(err) throw err;
+                });
+                
+            }
+
             //receive data from users
             const {username, firstName, lastName, email, gender } = req.body;
 
@@ -475,10 +604,9 @@ app.post('/api/employee',
                     
                     //save data into database                
                     let sql = `INSERT INTO employee(
-                            username, password, firstName, lastName, email, gender
-                            )VALUES(?, ?, ?, ?, ?, ?)`;   
-                    let params = [username, password_hash, firstName, lastName, email, gender];
-                
+                            username, password, firstName, lastName, email, gender,imageFile
+                            )VALUES(?, ?, ?, ?, ?, ?, ?)`;       
+                    let params = [username, password_hash, firstName, lastName, email, gender, fileName];
                     db.query(sql, params, (err, result) => {
                         if (err) throw err;
                         res.send({ 'message': 'เพิ่มข้อมูลพนักงานเรียบร้อยแล้ว', 'status': true });
@@ -589,7 +717,13 @@ app.delete('/api/employee/:id',
 //List products
 app.get('/api/product',
     function(req, res){        
-        const sql = "SELECT * FROM product";
+        const sql = `
+        SELECT product.*, producttype.typeName 
+        FROM product 
+        INNER JOIN producttype 
+            ON product.typeID = producttype.typeID
+        ORDER BY product.productID ASC`;
+
         db.query(sql, 
             function(err, result) {
                 if (err) throw err;
@@ -608,7 +742,12 @@ app.get('/api/product',
 //Show a product detail
 app.get('/api/product/:id', 
     function (req, res){
-        const sql = 'SELECT * FROM product WHERE productID = ?';
+        const sql = `
+        SELECT product.*, producttype.typeName 
+        FROM product 
+        INNER JOIN producttype 
+            ON product.typeID = producttype.typeID
+        WHERE product.productID = ?`;                
         db.query(sql, [req.params.id], (err, result) => {
             if (err) throw err;
 
@@ -635,12 +774,12 @@ app.get('/api/product/image/:filename',
 
 //Add a product
 app.post('/api/product', 
-    async function(req, res){
-  
-        //receive a token
-        const token = req.headers["authorization"].replace("Bearer ", "");        
+    async function(req, res){      
     
         try{
+            //receive a token
+            const token = req.headers["authorization"].replace("Bearer ", "");  
+
             //validate the token    
             let decode = jwt.verify(token, SECRET_KEY);               
             if(decode.positionID != 1 && decode.positionID != 2) {
@@ -683,11 +822,13 @@ app.post('/api/product',
 app.put('/api/product/:id', 
     async function(req, res){
   
-        //Receive a token
-        const token = req.headers["authorization"].replace("Bearer ", "");
+        //Receive a product id        
         const productID = req.params.id;
     
         try{
+            //Receive a token
+            const token = req.headers["authorization"].replace("Bearer ", "");
+
             //validate the token    
             let decode = jwt.verify(token, SECRET_KEY);               
             if(decode.positionID != 1 && decode.positionID != 2) {
@@ -752,6 +893,137 @@ app.delete('/api/product/:id',
             db.query(sql, [productID], (err, result) => {
                 if (err) throw err;
                 res.send({'message':'ลบข้อมูลสินค้าเรียบร้อยแล้ว','status':true});
+            });
+
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }
+        
+    }
+);
+
+
+/*############ PRODUCT TYPE ############*/
+//List product types
+app.get('/api/producttype',
+    function(req, res){        
+        const sql = "SELECT * FROM producttype";
+        db.query(sql, 
+            function(err, result) {
+                if (err) throw err;
+                
+                if(result.length > 0){
+                    res.send(result);
+                }else{
+                    res.send( {'message':'fail','status':false} );
+                }
+                
+            }                       
+        );
+    }
+);
+
+//Show a product type detail
+app.get('/api/producttype/:id', 
+    function (req, res){
+        const sql = 'SELECT * FROM producttype WHERE typeID = ?';
+        db.query(sql, [req.params.id], (err, result) => {
+            if (err) throw err;
+
+            if(result.length > 0) {
+                product = result[0];
+                product['message'] = 'success';
+                product['status'] = true;
+                res.json(product);
+            }else{
+                res.send({'message':'ไม่พบข้อมูลประเภทสินค้า','status':false});
+            }
+        });
+    }
+);
+
+//Add a product type
+app.post('/api/producttype', 
+    async function(req, res){          
+        try{
+            //receive a token
+            const token = req.headers["authorization"].replace("Bearer ", "");   
+
+            //validate the token    
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(decode.positionID != 1 && decode.positionID != 2) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }        
+            
+            //save data into database
+            const {typeName} = req.body;
+        
+            let sql = `INSERT INTO producttype(
+                       typeName
+                       )VALUES(?)`;                
+            let params = [typeName];            
+        
+            db.query(sql, params, (err, result) => {
+                if (err) throw err;
+                res.send({ 'message': 'เพิ่มข้อมูลประเภทสินค้าเรียบร้อยแล้ว', 'status': true });
+            });
+            
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
+    }
+);
+    
+//Update a product type
+app.put('/api/producttype/:id', 
+    async function(req, res){
+        //Receive a product type
+        const typeID = req.params.id;
+    
+        try{
+            //Receive a token
+            const token = req.headers["authorization"].replace("Bearer ", "");
+
+            //validate the token    
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(decode.positionID != 1 && decode.positionID != 2) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }    
+            
+            //save data into database
+            const {typeName} = req.body;
+        
+            let sql = `UPDATE producttype SET 
+                       typeName = ?
+                       WHERE typeID = ?`;
+            let params = [typeName, typeID];
+        
+            db.query(sql, params, (err, result) => {
+                if (err) throw err;
+                res.send({ 'message': 'แก้ไขข้อมูลประเภทสินค้าเรียบร้อยแล้ว', 'status': true });
+            });
+            
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
+    }
+);
+    
+//Delete a product
+app.delete('/api/producttype/:id',
+    async function(req, res){
+        const typeID = req.params.id;                    
+        try{
+            const token = req.headers["authorization"].replace("Bearer ", "");
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(decode.positionID != 1 && decode.positionID != 2) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }
+            
+            const sql = 'DELETE FROM producttype WHERE typeID = ?';
+            db.query(sql, [typeID], (err, result) => {
+                if (err) throw err;
+                res.send({'message':'ลบข้อมูลประเภทสินค้าเรียบร้อยแล้ว','status':true});
             });
 
         }catch(error){
