@@ -2,6 +2,8 @@ const express = require('express')
 const mysql = require('mysql2')
 const app = express()
 const port = 4000
+const swaggerUi = require("swagger-ui-express");
+const swaggerFile = require("./swagger-output.json"); // Load generated docs
 
 const https = require('https');
 const fs = require('fs');
@@ -37,6 +39,9 @@ app.use(express.json())
 app.use(express.urlencoded ({extended: true}))
 app.use(cors());
 app.use(fileupload());
+
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerFile));
+
 
 
 //Hello World API
@@ -1688,6 +1693,38 @@ app.post('/api/employee/chat/post', async (req, res) => {
   
   
 /*############## DASHBOARD ##############*/
+//ยอดการสั่งซื้อรายปี (บาท) -- สำหรับ admin    
+app.get('/api/yearlySale', (req, res) => {
+    const custID = req.params.id;
+    const token = req.headers["authorization"].replace("Bearer ", "");
+    try{
+        const decode = jwt.verify(token, SECRET_KEY);               
+        if(decode.positionID != 1) {            
+            return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        }  
+
+        const sql = `
+        SELECT SUBSTRING(orders.orderDate,1,4) AS year,
+            SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
+        FROM product
+            INNER JOIN orderdetail ON product.productID=orderdetail.productID
+            INNER JOIN orders ON orderdetail.orderID=orders.orderID
+        WHERE orders.statusID>=3
+        GROUP BY SUBSTRING(orders.orderDate,1,4)
+        ORDER BY SUBSTRING(orders.orderDate,1,4) ASC
+        LIMIT 5`;
+      
+        db.query(sql, [custID], (err, results) => {
+          if (err) throw err;
+          res.json(results);
+        });
+
+    }catch(error){
+        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+    }
+
+});  
+
 //ยอดการสั่งซื้อรายปี (บาท)    
 app.get('/api/yearlySale/:id', (req, res) => {
     const custID = req.params.id;
