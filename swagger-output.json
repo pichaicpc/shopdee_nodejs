@@ -1218,6 +1218,23 @@
         }
       }
     },
+    "/api/yearlySale": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/yearlySale/{id}": {
       "get": {
         "description": "",

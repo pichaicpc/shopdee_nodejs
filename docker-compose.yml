@@ -1,0 +1,40 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_container
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: 1234
+      MYSQL_DATABASE: shopdee
+    ports:
+      - "3307:3306"   # Use 3307 on host, to avoid conflict with your Windows MySQL
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./import_mysql:/docker-entrypoint-initdb.d
+    networks:
+      - shopdee_network
+
+  nodejs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nodejs_container
+    restart: always
+    ports:
+      - "4000:4000"
+    depends_on:
+      - mysql
+    networks:
+      - shopdee_network
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: 1234
+      DB_DATABASE: shopdee
+
+volumes:
+  mysql_data:
+
+networks:
+  shopdee_network:
