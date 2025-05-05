@@ -176,7 +176,21 @@ app.get('/api/profile/:id',
               return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
             }
                         
-            let sql = "SELECT * FROM customer WHERE custID = ? AND isActive = 1";        
+            let sql = `
+            SELECT custID,
+                username,
+                firstName,
+                lastName,
+                address,                                
+                mobilePhone,                
+                gender,
+                email,
+                imageFile,                                
+                IF(birthdate IS NOT NULL, DATE_FORMAT(birthdate, '%Y-%m-%d'), NULL) AS birthdate
+            FROM customer 
+            WHERE custID = ? AND isActive = 1
+            `;
+     
             let customer = await query(sql, [custID]);        
             
             customer = customer[0];
@@ -200,6 +214,50 @@ app.get('/api/customer/image/:filename',
     }
 );
 
+//Upload a customer image
+app.post('/api/customer/image/upload/:id', 
+    async function(req, res){
+  
+        //receive a token
+        const token = req.headers["authorization"].replace("Bearer ", "");
+        const custID = req.params.id;
+    
+        try{
+            //validate the token    
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(custID != decode.custID && decode.positionID != 1 && decode.positionID != 2) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }
+        
+            //save file into folder  
+            let fileName = "";
+            if (req?.files?.imageFile){        
+                const imageFile = req.files.imageFile; // image file    
+                
+                fileName = imageFile.name.split(".");// file name
+                fileName = fileName[0] + Date.now() + '.' + fileName[1]; 
+        
+                const imagePath = path.join(__dirname, 'assets/customer', fileName); //image path
+        
+                fs.writeFile(imagePath, imageFile.data, (err) => {
+                if(err) throw err;
+                });
+                
+            }else{
+                res.send( {'message':'กรุณาเลือกไฟล์รูปภาพ','status':false} );
+            }
+                            
+            let sql = `UPDATE customer SET imageFile = ? WHERE custID = ?`;        
+            db.query(sql, [fileName, custID], (err, result) => {
+                if (err) throw err;
+                res.send({ 'message': 'อัปโหลดไฟล์รูปภาพเรียบร้อยแล้ว', 'status': true });
+            });
+            
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
+    }
+);
 
 //List customers
 app.get('/api/customer',
@@ -329,7 +387,7 @@ app.put('/api/customer/:id',
         //receive a token
         const token = req.headers["authorization"].replace("Bearer ", "");
         const custID = req.params.id;
-    
+            
         try{
             //validate the token    
             let decode = jwt.verify(token, SECRET_KEY);               
@@ -353,10 +411,13 @@ app.put('/api/customer/:id',
                 
             }
     
-        
             //save data into database
-            const {username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone} = req.body;
-        
+            let {username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone} = req.body;            
+            if (gender == -1){
+                gender = null;
+            }
+       
+
             let sql = `
                 UPDATE 
                     customer 
