@@ -1,24 +1,24 @@
-const express = require('express')
-const mysql = require('mysql2')
-const app = express()
-const port = 4000
+require('dotenv').config();
+const express = require('express');
+const mysql = require('mysql2');
+const app = express();
 const swaggerUi = require("swagger-ui-express");
 const swaggerFile = require("./swagger-output.json"); // Load generated docs
-
 const https = require('https');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const SECRET_KEY = 'UX23Y24%@&2aMb';
-
 const fileupload = require('express-fileupload');
 const path = require('path');
 const crypto = require('crypto');
+const { body, validationResult } = require('express-validator');
+const SERVER_PORT = process.env.SERVER_PORT;
+const SECRET_KEY = process.env.SECRET_KEY;
 
 // Load SSL certificates
-const privateKey = fs.readFileSync('privatekey.pem', 'utf8');
-const certificate = fs.readFileSync('certificate.pem', 'utf8');
-const credentials = { key: privateKey, cert: certificate };
+// const privateKey = fs.readFileSync(process.env.PRIVATE_KEY, 'utf8');
+// const certificate = fs.readFileSync(process.env.CERTIFICATE, 'utf8');
+// const credentials = { key: privateKey, cert: certificate };
 
 // Import CORS library
 const cors = require('cors');
@@ -26,30 +26,36 @@ const cors = require('cors');
 //Database(MySql) configulation
 const db = mysql.createConnection(
     {
-        host: process.env.DB_HOST || 'localhost',
-        user: process.env.DB_USER || 'root',
-        password: process.env.DB_PASSWORD || '1234',
-        database: process.env.DB_DATABASE || 'shopdee',
-        port: process.env.DB_PORT || 3306
+        host: process.env.DB_HOST,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        port: process.env.DB_PORT
     }
 )
-db.connect()
+db.connect();
 
 //Middleware (Body parser)
-app.use(express.json())
-app.use(express.urlencoded ({extended: true}))
+app.use(express.json());
+app.use(express.urlencoded ({extended: true}));
 app.use(cors());
 app.use(fileupload());
-
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerFile));
 
 
 
-//Hello World API
-app.get('/', function(req, res){
-    res.send('Hello World!')
-});
-
+function validateToken(req, res, next) {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).json({ message: 'Access denied' });
+  
+    try {
+      const decoded = jwt.verify(token, SECRET_KEY);
+      req.user = decoded;
+      next();
+    } catch (err) {
+      res.status(403).json({ message: 'Invalid token' });
+    }
+  }
 
 //Function to execute a query with a promise-based approach
 function query(sql, params) {
@@ -68,142 +74,95 @@ function query(sql, params) {
 /*############## CUSTOMER ##############*/
 //Register
 app.post('/api/register', 
-    function(req, res) {  
+    [
+        body('username').isString().notEmpty().withMessage('Username is required'),
+        body('password').isLength({ min: 4 }).withMessage('Password must be at least 4 characters'),
+        body('firstName').isString().notEmpty().withMessage('First name is required'),
+        body('lastName').isString().notEmpty().withMessage('Last name is required')
+    ],
+    async function(req, res) {  
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).send({ message: 'Validation errors', errors: errors.array(), status: false });
+        }
+
         const { username, password, firstName, lastName } = req.body;
-        
-        //check existing username
-        let sql="SELECT * FROM customer WHERE username=?";
-        db.query(sql, [username], async function(err, results) {
-            if (err) throw err;
-            
-            if(results.length == 0) {
-                //password and salt are encrypted by hash function (bcrypt)
-                const salt = await bcrypt.genSalt(10); //generate salte
-                const password_hash = await bcrypt.hash(password, salt);        
-                                
-                //insert customer data into the database
-                sql = 'INSERT INTO customer (username, password, firstName, lastName) VALUES (?, ?, ?, ?)';
-                db.query(sql, [username, password_hash, firstName, lastName], (err, result) => {
-                    if (err) throw err;
-                
-                    res.send({'message':'ลงทะเบียนสำเร็จแล้ว','status':true});
-                });      
-            }else{
-                res.send({'message':'ชื่อผู้ใช้ซ้ำ','status':false});
+        try {
+            const existingUser = await query("SELECT * FROM customer WHERE username=?", [username]);
+            if (existingUser.length > 0) {
+                return res.status(409).send({ message: 'Username already exists', status: false });
             }
 
-        });      
+            const salt = await bcrypt.genSalt(10);
+            const password_hash = await bcrypt.hash(password, salt);
+
+            await query('INSERT INTO customer (username, password, firstName, lastName) VALUES (?, ?, ?, ?)', 
+                        [username, password_hash, firstName, lastName]);
+            res.send({ message: 'Registration successful', status: true });
+        } catch (err) {
+            next(err);
+        }
     }
 );
 
 
 //Login
 app.post('/api/login',
-    async function(req, res){
-        //validate username
-        const {username, password} = req.body;                
-        let sql = "SELECT * FROM customer WHERE username=? AND isActive = 1";        
-        let customer = await query(sql, [username, username]);        
-        
-        if(customer.length <= 0){            
-            return res.send( {'message':'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง','status':false} );
-        }else{            
-            customer = customer[0];
-            custID = customer['custID'];               
-            password_hash = customer['password'];       
+    [
+        body('username').isString().notEmpty().withMessage('Username is required'),
+        body('password').isString().notEmpty().withMessage('Password is required')
+    ],
+    async function(req, res, next) {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).send({ message: 'Validation errors', errors: errors.array(), status: false });
         }
 
-        //validate a number of attempts 
-        let loginAttempt = 0;
-        sql = "SELECT loginAttempt FROM customer WHERE username=? AND isActive = 1 ";        
-        sql += "AND lastAttemptTime >= CURRENT_TIMESTAMP - INTERVAL 24 HOUR ";        
-        
-        row = await query(sql, [username, username]);    
-        if(row.length > 0){
-            loginAttempt = row[0]['loginAttempt'];
-
-            if(loginAttempt>= 3) {
-                return res.send( {'message':'บัญชีคุณถูกล๊อก เนื่องจากมีการพยายามเข้าสู่ระบบเกินกำหนด','status':false} );    
-            }    
-        }else{
-            //reset login attempt                
-            sql = "UPDATE customer SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";                    
-            await query(sql, [username, username]);               
-        }              
-        
-
-        //validate password       
-        if(bcrypt.compareSync(password, password_hash)){
-            //reset login attempt                
-            sql = "UPDATE customer SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";        
-            await query(sql, [username, username]);   
-
-            //get token
-            const token = jwt.sign({ custID: custID, username: username }, SECRET_KEY, { expiresIn: '1h' });                
-
-            customer['token'] = token;
-            customer['message'] = 'เข้าสู่ระบบสำเร็จ';
-            customer['status'] = true;
-
-            res.send(customer);            
-        }else{
-            //update login attempt
-            const lastAttemptTime = new Date();
-            sql = "UPDATE customer SET loginAttempt = loginAttempt + 1, lastAttemptTime=? ";
-            sql += "WHERE username=? AND isActive = 1";                   
-            await query(sql, [lastAttemptTime, username, username]);           
-            
-            if(loginAttempt >=2){
-                res.send( {'message':'บัญชีคุณถูกล๊อก เนื่องจากมีการพยายามเข้าสู่ระบบเกินกำหนด','status':false} );    
-            }else{
-                res.send( {'message':'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง','status':false} );    
-            }            
-        }
-
-    }
-);
-
-
-//Show a customer Profile
-app.get('/api/profile/:id',
-    async function(req, res){
-        const custID = req.params.id;        
-        const token = req.headers["authorization"].replace("Bearer ", "");
-            
-        try{
-            let decode = jwt.verify(token, SECRET_KEY);               
-            if(custID != decode.custID) {
-              return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        const { username, password } = req.body;
+        try {
+            const customer = await query("SELECT * FROM customer WHERE username=? AND isActive = 1", [username]);
+            if (customer.length === 0) {
+                return res.status(401).send({ message: 'Invalid username or password', status: false });
             }
-                        
-            let sql = `
-            SELECT custID,
-                username,
-                firstName,
-                lastName,
-                address,                                
-                mobilePhone,                
-                gender,
-                email,
-                imageFile,                                
-                IF(birthdate IS NOT NULL, DATE_FORMAT(birthdate, '%Y-%m-%d'), NULL) AS birthdate
-            FROM customer 
-            WHERE custID = ? AND isActive = 1
-            `;
-     
-            let customer = await query(sql, [custID]);        
-            
-            customer = customer[0];
-            customer['message'] = 'success';
-            customer['status'] = true;
-            res.send(customer); 
 
-        }catch(error){
-            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+            const isPasswordValid = bcrypt.compareSync(password, customer[0].password);
+            if (!isPasswordValid) {
+                return res.status(401).send({ message: 'Invalid username or password', status: false });
+            }
+
+            const token = jwt.sign({ custID: customer[0].custID, username: customer[0].username }, SECRET_KEY, { expiresIn: '1h' });
+            res.send({custID: customer[0]['custID'], username, email: customer[0]['email'], token, message: 'Login successful', status: true });
+        } catch (err) {
+            next(err);
         }
-        
     }
 );
+
+
+// Enhanced Profile API with token validation
+app.get('/api/profile/:id', validateToken, 
+    async function(req, res, next) {
+    const custID = req.params.id;
+    if (custID != req.user.custID) {
+        return res.status(403).send({ message: 'Access denied', status: false });
+    }
+
+    try {
+        const customer = await query(`
+            SELECT custID, username, firstName, lastName, address, mobilePhone, gender, email, imageFile,
+                   IF(birthdate IS NOT NULL, DATE_FORMAT(birthdate, '%Y-%m-%d'), NULL) AS birthdate
+            FROM customer 
+            WHERE custID = ? AND isActive = 1`, [custID]);
+
+        if (customer.length === 0) {
+            return res.status(404).send({ message: 'Customer not found', status: false });
+        }
+
+        res.send({ ...customer[0], message: 'Success', status: true });
+    } catch (err) {
+        next(err);
+    }
+});
 
 
 //Show a customer image
@@ -413,11 +372,11 @@ app.put('/api/customer/:id',
     
             //save data into database
             let {username, password, firstName, lastName, email, gender, birthdate, address, homePhone, mobilePhone} = req.body;            
+            
             if (gender == -1){
                 gender = null;
-            }
+            }            
        
-
             let sql = `
                 UPDATE 
                     customer 
@@ -1105,6 +1064,7 @@ app.delete('/api/producttype/:id',
 //เพิ่มสินค้าเข้าตะกร้า
 app.post('/api/makeorder', (req, res) => {  
     const { custID, productID, quantity, price } = req.body;    
+    
     const token = req.headers["authorization"].replace("Bearer ", "");
     try{
         let decode = jwt.verify(token, SECRET_KEY);               
@@ -1249,6 +1209,7 @@ app.post('/api/confirmpayment',
 app.get('/api/cart/:id', (req, res) => {
     const custID = req.params.id;
     const token = req.headers["authorization"].replace("Bearer ", "");
+
     try{
         let decode = jwt.verify(token, SECRET_KEY);               
         if(custID != decode.custID) {
@@ -1271,6 +1232,7 @@ app.get('/api/cart/:id', (req, res) => {
     
         db.query(sql, [custID], (err, results) => {
             if (err) throw err;
+            
             res.json(results);
         });
 
@@ -1280,30 +1242,97 @@ app.get('/api/cart/:id', (req, res) => {
 
 }); 
   
-//แสดงรายการประวัติการสั่งซื้อ
-app.get('/api/history/:id', (req, res) => {
-
+//แสดงรายการสินค้าที่อยู่ในตะกร้า
+app.get('/api/cart/product/:id', (req, res) => {
     const custID = req.params.id;
     const token = req.headers["authorization"].replace("Bearer ", "");
+
     try{
         let decode = jwt.verify(token, SECRET_KEY);               
         if(custID != decode.custID) {
           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
         }
 
-        let sql = 'SELECT orders.orderID, orderDate, shipDate, receiveDate, orders.custID, statusID,';
-        sql += 'customer.firstName,customer.lastName,';
-        sql += 'SUM(orderdetail.quantity) AS totalQuantity,';
-        sql += 'SUM(orderdetail.quantity*orderdetail.price) AS totalPrice ';
-        sql += 'FROM orders ';
-        sql += '    INNER JOIN customer ON customer.custID=orders.custID ';         
-        sql += '    INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID ';
-        sql += 'WHERE orders.custID=?  AND orders.statusID<>0 ';
-        sql += 'GROUP BY orders.orderID, orderDate, shipDate,';
-        sql += '    receiveDate, orders.custID, statusID,';
-        sql += '    customer.firstName,customer.lastName ';
-        sql += 'ORDER BY orders.orderID DESC';
+        let sql = `
+        SELECT orderdetail.orderID, orderdetail.productID, orderdetail.quantity, orderdetail.price,
+                product.productName, product.imageFile
+        FROM orderdetail
+            INNER JOIN product ON orderdetail.productID=product.productID
+            INNER JOIN orders ON orderdetail.orderID=orders.orderID
+        WHERE orders.custID=?  AND orders.statusID=0
+        GROUP BY orderdetail.orderID, orderdetail.productID, orderdetail.quantity, orderdetail.price,
+                product.productName, product.imageFile`;
+    
+        db.query(sql, [custID], (err, results) => {
+            if (err) throw err;
+            
+            res.json(results);
+        });
 
+    }catch(error){
+        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+    }
+
+}); 
+
+//ลบรายการสินค้าในตะกร้า
+app.delete('/api/cart/product/:id',
+    async function(req, res){
+        const custID = req.params.id;        
+        const token = req.headers["authorization"].replace("Bearer ", "");
+            
+        try{
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(custID != decode.custID) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }
+
+            const {orderID, productID} = req.body;            
+            const sql = `DELETE FROM orderdetail WHERE orderID = ? AND productID = ?`;
+            
+            db.query(sql, [orderID, productID], (err, result) => {
+                if (err) throw err;
+                res.send({'message':'ลบรายการสินค้าเรียบร้อยแล้ว','status':true});
+            });
+
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }
+        
+    }
+);
+
+
+//แสดงรายการประวัติการสั่งซื้อ
+app.get('/api/history/:id', (req, res) => {
+
+    const custID = req.params.id;
+    const token = req.headers["authorization"].replace("Bearer ", "");
+    try{
+        let decode = jwt.verify(token, SECRET_KEY);      
+       
+        if(custID != decode.custID) {
+          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+        }
+
+        let sql = `SELECT orders.orderID, 
+        IF(orderDate IS NOT NULL, DATE_FORMAT(orderDate, '%Y-%m-%d'), NULL) AS orderDate, 
+        IF(shipDate IS NOT NULL, DATE_FORMAT(shipDate, '%Y-%m-%d'), NULL) AS shipDate, 
+        IF(receiveDate IS NOT NULL, DATE_FORMAT(receiveDate, '%Y-%m-%d'), NULL) AS receiveDate, 
+        orders.custID,
+        orders.statusID,customer.firstName,customer.lastName,orderstatus.statusName,
+        SUM(orderdetail.quantity) AS totalQuantity,
+        SUM(orderdetail.quantity*orderdetail.price) AS totalPrice
+        
+        FROM orders 
+            INNER JOIN customer ON customer.custID=orders.custID          
+            INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID
+            INNER JOIN orderstatus ON orders.statusID=orderstatus.statusID 
+        WHERE orders.custID=?  AND orders.statusID<>0 
+        GROUP BY orders.orderID, orderDate, shipDate, receiveDate, orders.custID,
+                orders.statusID,customer.firstName,customer.lastName,orderstatus.statusName 
+        ORDER BY orders.orderID DESC`;
+        
         db.query(sql, [custID], (err, results) => {
             if (err) throw err;
             res.json(results);
@@ -1327,17 +1356,22 @@ app.get('/api/orderinfo/:custID/:orderID', (req, res) => {
           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
         }
 
-        let sql = 'SELECT orders.orderID, orderDate, shipDate, receiveDate, orders.custID, statusID,';
-        sql += 'customer.firstName,customer.lastName,customer.address,customer.mobilePhone,';
-        sql += 'SUM(orderdetail.quantity) AS totalQuantity,';
-        sql += 'SUM(orderdetail.quantity*orderdetail.price) AS totalPrice ';
-        sql += 'FROM orders ';
-        sql += '    INNER JOIN customer ON customer.custID=orders.custID ';         
-        sql += '    INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID ';
-        sql += 'WHERE orders.orderID=? ';
-        sql += 'GROUP BY orders.orderID, orderDate, shipDate,';
-        sql += '    receiveDate, orders.custID, statusID,';
-        sql += '    customer.firstName,customer.lastName,customer.address,customer.mobilePhone ';
+        let sql = `SELECT orders.orderID, 
+            IF(orderDate IS NOT NULL, DATE_FORMAT(orderDate, '%Y-%m-%d'), NULL) AS orderDate, 
+            IF(shipDate IS NOT NULL, DATE_FORMAT(shipDate, '%Y-%m-%d'), NULL) AS shipDate, 
+            IF(receiveDate IS NOT NULL, DATE_FORMAT(receiveDate, '%Y-%m-%d'), NULL) AS receiveDate,         
+            orders.custID, orders.statusID,orderstatus.statusName,
+            customer.firstName,customer.lastName,customer.address,customer.mobilePhone,
+            SUM(orderdetail.quantity) AS totalQuantity,
+            SUM(orderdetail.quantity*orderdetail.price) AS totalPrice
+        FROM orders
+            INNER JOIN customer ON customer.custID=orders.custID         
+            INNER JOIN orderdetail ON orders.orderID=orderdetail.orderID
+            INNER JOIN orderstatus ON orders.statusID=orderstatus.statusID
+        WHERE orders.orderID=?
+        GROUP BY orders.orderID, orderDate, shipDate,
+            receiveDate, orders.custID, orders.statusID, orderstatus.statusName,
+            customer.firstName,customer.lastName,customer.address,customer.mobilePhone`
     
         db.query(sql, [orderID], (err, results) => {
             if (err) throw err;
@@ -1693,7 +1727,7 @@ app.post('/api/chat/show', async (req, res) => {
           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
         }
         
-        //console.log('show:'+empID);
+        
         let sql = `
         SELECT  chat.empID
         FROM chat
@@ -1753,144 +1787,144 @@ app.post('/api/employee/chat/post', async (req, res) => {
 
 });
   
-  
-/*############## DASHBOARD ##############*/
-//ยอดการสั่งซื้อรายปี (บาท) -- สำหรับ admin    
-app.get('/api/yearlySale', (req, res) => {
-    const custID = req.params.id;
-    const token = req.headers["authorization"].replace("Bearer ", "");
-    try{
-        const decode = jwt.verify(token, SECRET_KEY);               
-        if(decode.positionID != 1) {            
-            return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
-        }  
-
-        const sql = `
-        SELECT SUBSTRING(orders.orderDate,1,4) AS year,
-            SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
-        FROM product
-            INNER JOIN orderdetail ON product.productID=orderdetail.productID
-            INNER JOIN orders ON orderdetail.orderID=orders.orderID
-        WHERE orders.statusID>=3
-        GROUP BY SUBSTRING(orders.orderDate,1,4)
-        ORDER BY SUBSTRING(orders.orderDate,1,4) ASC
-        LIMIT 5`;
-      
-        db.query(sql, [custID], (err, results) => {
-          if (err) throw err;
-          res.json(results);
-        });
-
-    }catch(error){
-        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
-    }
-
-});  
-
-//ยอดการสั่งซื้อรายปี (บาท)    
-app.get('/api/yearlySale/:id', (req, res) => {
-    const custID = req.params.id;
-    const token = req.headers["authorization"].replace("Bearer ", "");
-    try{
-        const decode = jwt.verify(token, SECRET_KEY);               
-        if(custID != decode.custID) {
-          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
-        }
-
-        const sql = `
-        SELECT SUBSTRING(orders.orderDate,1,4) AS year,
-            SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
-        FROM product
-            INNER JOIN orderdetail ON product.productID=orderdetail.productID
-            INNER JOIN orders ON orderdetail.orderID=orders.orderID
-        WHERE orders.custID=? AND orders.statusID>=3
-        GROUP BY SUBSTRING(orders.orderDate,1,4)
-        ORDER BY SUBSTRING(orders.orderDate,1,4) ASC
-        LIMIT 5`;
-      
-        db.query(sql, [custID], (err, results) => {
-          if (err) throw err;
-          res.json(results);
-        });
-
-    }catch(error){
-        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
-    }
-
-});  
-
-//ยอดการสั่งซื้อรายเดือน (บาท)    
-app.get('/api/monthlySale/:id', (req, res) => {
-    const currentDate = new Date();
-    const year = currentDate.getFullYear();
-    const custID = req.params.id;
-    const token = req.headers["authorization"].replace("Bearer ", "");
-
-    try{
-        const decode = jwt.verify(token, SECRET_KEY);               
-        if(custID != decode.custID) {
-          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
-        }    
-    
-        const sql = `
-        SELECT SUBSTRING(orders.orderDate,6,2) AS month,
-            SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
-        FROM product
-            INNER JOIN orderdetail ON product.productID=orderdetail.productID
-            INNER JOIN orders ON orderdetail.orderID=orders.orderID
-        WHERE orders.custID=? AND SUBSTRING(orderDate,1,4)=? AND orders.statusID>=3
-        GROUP BY SUBSTRING(orders.orderDate,6,2)
-        ORDER BY SUBSTRING(orders.orderDate,6,2) ASC`;
-    
-        db.query(sql, [custID, year], (err, results) => {
-            if (err) throw err;
-            res.json(results);
-        });
-    }catch(error){
-        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
-    }
-
-});  
-  
-//สินค้าที่มียอดการสั่งซื้อ 5 อันดับแรก (บาท)
-app.get('/api/topFiveProduct/:id', (req, res) => {
-
-    const currentDate = new Date();
-    const year = currentDate.getFullYear();
-    const custID = req.params.id;
-    const token = req.headers["authorization"].replace("Bearer ", "");
-
-    try{
-        const decode = jwt.verify(token, SECRET_KEY);               
-        if(custID != decode.custID) {
-          return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
-        }   
-
-        const sql = `
-        SELECT product.productID, productName,
-            SUM(orderdetail.quantity*orderdetail.price) AS totalAmount 
-        FROM product
-            INNER JOIN orderdetail ON product.productID=orderdetail.productID 
-            INNER JOIN orders ON orderdetail.orderID=orders.orderID 
-        WHERE orders.custID=? AND SUBSTRING(orderDate,1,4)=? AND orders.statusID>=3 
-        GROUP BY product.productID, productName
-        ORDER BY SUM(orderdetail.quantity*orderdetail.price) DESC 
-        LIMIT 5`;
-    
-        db.query(sql, [custID, year], (err, results) => {
-            if (err) throw err;
-            res.json(results);
-        });
-    }catch(error){
-        res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
-    }
-
-}); 
-
-
-/*############## WEB SERVER ##############*/  
-// Create an HTTPS server
-const httpsServer = https.createServer(credentials, app);
-app.listen(port, () => {
-    console.log(`HTTPS Server running on port ${port}`);
-});
+ 
+ /*############## DASHBOARD ##############*/
+ //ยอดการสั่งซื้อรายปี (บาท) -- สำหรับ admin    
+ app.get('/api/yearlySale', (req, res) => {
+     const custID = req.params.id;
+     const token = req.headers["authorization"].replace("Bearer ", "");
+     try{
+         const decode = jwt.verify(token, SECRET_KEY);               
+         if(decode.positionID != 1) {            
+             return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+         }  
+ 
+         const sql = `
+         SELECT SUBSTRING(orders.orderDate,1,4) AS year,
+             SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
+         FROM product
+             INNER JOIN orderdetail ON product.productID=orderdetail.productID
+             INNER JOIN orders ON orderdetail.orderID=orders.orderID
+         WHERE orders.statusID>=3
+         GROUP BY SUBSTRING(orders.orderDate,1,4)
+         ORDER BY SUBSTRING(orders.orderDate,1,4) ASC
+         LIMIT 5`;
+       
+         db.query(sql, [custID], (err, results) => {
+           if (err) throw err;
+           res.json(results);
+         });
+ 
+     }catch(error){
+         res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+     }
+ 
+ });  
+ 
+ //ยอดการสั่งซื้อรายปี (บาท)    
+ app.get('/api/yearlySale/:id', (req, res) => {
+     const custID = req.params.id;
+     const token = req.headers["authorization"].replace("Bearer ", "");
+     try{
+         const decode = jwt.verify(token, SECRET_KEY);               
+         if(custID != decode.custID) {
+           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+         }
+ 
+         const sql = `
+         SELECT SUBSTRING(orders.orderDate,1,4) AS year,
+             SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
+         FROM product
+             INNER JOIN orderdetail ON product.productID=orderdetail.productID
+             INNER JOIN orders ON orderdetail.orderID=orders.orderID
+         WHERE orders.custID=? AND orders.statusID>=3
+         GROUP BY SUBSTRING(orders.orderDate,1,4)
+         ORDER BY SUBSTRING(orders.orderDate,1,4) ASC
+         LIMIT 5`;
+       
+         db.query(sql, [custID], (err, results) => {
+           if (err) throw err;
+           res.json(results);
+         });
+ 
+     }catch(error){
+         res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+     }
+ 
+ });  
+ 
+ //ยอดการสั่งซื้อรายเดือน (บาท)    
+ app.get('/api/monthlySale/:id', (req, res) => {
+     const currentDate = new Date();
+     const year = currentDate.getFullYear();
+     const custID = req.params.id;
+     const token = req.headers["authorization"].replace("Bearer ", "");
+ 
+     try{
+         const decode = jwt.verify(token, SECRET_KEY);               
+         if(custID != decode.custID) {
+           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+         }    
+     
+         const sql = `
+         SELECT SUBSTRING(orders.orderDate,6,2) AS month,
+             SUM(orderdetail.quantity*orderdetail.price) AS totalAmount
+         FROM product
+             INNER JOIN orderdetail ON product.productID=orderdetail.productID
+             INNER JOIN orders ON orderdetail.orderID=orders.orderID
+         WHERE orders.custID=? AND SUBSTRING(orderDate,1,4)=? AND orders.statusID>=3
+         GROUP BY SUBSTRING(orders.orderDate,6,2)
+         ORDER BY SUBSTRING(orders.orderDate,6,2) ASC`;
+     
+         db.query(sql, [custID, year], (err, results) => {
+             if (err) throw err;
+             res.json(results);
+         });
+     }catch(error){
+         res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+     }
+ 
+ });  
+   
+ //สินค้าที่มียอดการสั่งซื้อ 5 อันดับแรก (บาท)
+ app.get('/api/topFiveProduct/:id', (req, res) => {
+ 
+     const currentDate = new Date();
+     const year = currentDate.getFullYear();
+     const custID = req.params.id;
+     const token = req.headers["authorization"].replace("Bearer ", "");
+ 
+     try{
+         const decode = jwt.verify(token, SECRET_KEY);               
+         if(custID != decode.custID) {
+           return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+         }   
+ 
+         const sql = `
+         SELECT product.productID, productName,
+             SUM(orderdetail.quantity*orderdetail.price) AS totalAmount 
+         FROM product
+             INNER JOIN orderdetail ON product.productID=orderdetail.productID 
+             INNER JOIN orders ON orderdetail.orderID=orders.orderID 
+         WHERE orders.custID=? AND SUBSTRING(orderDate,1,4)=? AND orders.statusID>=3 
+         GROUP BY product.productID, productName
+         ORDER BY SUM(orderdetail.quantity*orderdetail.price) DESC 
+         LIMIT 5`;
+     
+         db.query(sql, [custID, year], (err, results) => {
+             if (err) throw err;
+             res.json(results);
+         });
+     }catch(error){
+         res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+     }
+ 
+ }); 
+ 
+ 
+ /*############## WEB SERVER ##############*/  
+ // Create an HTTPS server
+ //const httpsServer = https.createServer(credentials, app);
+ app.listen(SERVER_PORT, () => {    
+    console.log(`HTTPS Server running on port ${SERVER_PORT}`);
+ });
